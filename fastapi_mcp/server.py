@@ -1,20 +1,18 @@
 import json
-import httpx
-from typing import Dict, Optional, Any, List, Union, Literal, Sequence
-from typing_extensions import Annotated, Doc
+import logging
+from typing import Any, Dict, List, Literal, Optional, Sequence, Union
 
-from fastapi import FastAPI, Request, APIRouter, params
+import httpx
+import mcp.types as types
+from fastapi import APIRouter, FastAPI, Request, params
 from fastapi.openapi.utils import get_openapi
 from mcp.server.lowlevel.server import Server
-import mcp.types as types
+from typing_extensions import Annotated, Doc
 
 from fastapi_mcp.openapi.convert import convert_openapi_to_mcp_tools
-from fastapi_mcp.transport.sse import FastApiSseTransport
 from fastapi_mcp.transport.http import FastApiHttpSessionManager
-from fastapi_mcp.types import HTTPRequestInfo, AuthConfig
-
-import logging
-
+from fastapi_mcp.transport.sse import FastApiSseTransport
+from fastapi_mcp.types import AuthConfig, HTTPRequestInfo
 
 logger = logging.getLogger(__name__)
 
@@ -148,18 +146,13 @@ class FastApiMCP:
             return self.tools
 
         @mcp_server.call_tool()
-        async def handle_call_tool(
-            name: str, arguments: Dict[str, Any]
-        ) -> List[Union[types.TextContent, types.ImageContent, types.EmbeddedResource]]:
-            # Extract HTTP request info from MCP context
+        async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> types.CallToolResult:
+            # (keep your http_request_info extraction exactly as-is)
             http_request_info = None
             try:
-                # Access the MCP server's request context to get the original HTTP Request
                 request_context = mcp_server.request_context
-
                 if request_context and hasattr(request_context, "request"):
                     http_request = request_context.request
-
                     if http_request and hasattr(http_request, "method"):
                         http_request_info = HTTPRequestInfo(
                             method=http_request.method,
@@ -169,12 +162,10 @@ class FastApiMCP:
                             query_params=dict(http_request.query_params),
                             body=None,
                         )
-                        logger.debug(
-                            f"Extracted HTTP request info from context: {http_request_info.method} {http_request_info.path}"
-                        )
             except (LookupError, AttributeError) as e:
                 logger.error(f"Could not extract HTTP request info from context: {e}")
 
+            # ✅ now returns ServerResult (CallToolResult)
             return await self._execute_api_tool(
                 client=self._http_client,
                 tool_name=name,
@@ -256,10 +247,10 @@ class FastApiMCP:
 
     def _setup_auth_2025_03_26(self):
         from fastapi_mcp.auth.proxy import (
-            setup_oauth_custom_metadata,
-            setup_oauth_metadata_proxy,
             setup_oauth_authorize_proxy,
+            setup_oauth_custom_metadata,
             setup_oauth_fake_dynamic_register_endpoint,
+            setup_oauth_metadata_proxy,
         )
 
         if self._auth_config:
@@ -279,7 +270,7 @@ class FastApiMCP:
 
                 setup_oauth_metadata_proxy(
                     app=self.fastapi,
-                    metadata_url=metadata_url,
+                    metadata_url=metadata_url,  # type: ignore
                     path=self._auth_config.metadata_path,
                     register_path="/oauth/register" if self._auth_config.setup_fake_dynamic_registration else None,
                 )
@@ -483,33 +474,29 @@ class FastApiMCP:
 
     async def _execute_api_tool(
         self,
-        client: Annotated[httpx.AsyncClient, Doc("httpx client to use in API calls")],
-        tool_name: Annotated[str, Doc("The name of the tool to execute")],
-        arguments: Annotated[Dict[str, Any], Doc("The arguments for the tool")],
-        operation_map: Annotated[Dict[str, Dict[str, Any]], Doc("A mapping from tool names to operation details")],
-        http_request_info: Annotated[
-            Optional[HTTPRequestInfo],
-            Doc("HTTP request info to forward to the actual API call"),
-        ] = None,
-    ) -> List[Union[types.TextContent, types.ImageContent, types.EmbeddedResource]]:
-        """
-        Execute an MCP tool by making an HTTP request to the corresponding API endpoint.
-
-        Returns:
-            The result as MCP content types
-        """
+        client: httpx.AsyncClient,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        operation_map: Dict[str, Dict[str, Any]],
+        http_request_info: Optional[HTTPRequestInfo] = None,
+    ) -> types.CallToolResult:
         if tool_name not in operation_map:
-            raise Exception(f"Unknown tool: {tool_name}")
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=f"Unknown tool: {tool_name}")],
+                isError=True,
+            )
 
         operation = operation_map[tool_name]
         path: str = operation["path"]
         method: str = operation["method"]
         parameters: List[Dict[str, Any]] = operation.get("parameters", [])
-        arguments = arguments.copy() if arguments else {}  # Deep copy arguments to avoid mutating the original
+        structured_content: Dict[str, Any] = operation.get("structured_content", [])
+        arguments = arguments.copy() if arguments else {}
 
+        # --- existing param mapping logic unchanged ---
         for param in parameters:
             if param.get("in") == "path" and param.get("name") in arguments:
-                param_name = param.get("name", None)
+                param_name = param.get("name")
                 if param_name is None:
                     raise ValueError(f"Parameter name is None for parameter: {param}")
                 path = path.replace(f"{{{param_name}}}", str(arguments.pop(param_name)))
@@ -517,7 +504,7 @@ class FastApiMCP:
         query = {}
         for param in parameters:
             if param.get("in") == "query" and param.get("name") in arguments:
-                param_name = param.get("name", None)
+                param_name = param.get("name")
                 if param_name is None:
                     raise ValueError(f"Parameter name is None for parameter: {param}")
                 query[param_name] = arguments.pop(param_name)
@@ -525,49 +512,52 @@ class FastApiMCP:
         headers = {}
         for param in parameters:
             if param.get("in") == "header" and param.get("name") in arguments:
-                param_name = param.get("name", None)
+                param_name = param.get("name")
                 if param_name is None:
                     raise ValueError(f"Parameter name is None for parameter: {param}")
                 headers[param_name] = arguments.pop(param_name)
 
-        # Forward headers that are in the allowlist
+        # Forward allowlisted headers
         if http_request_info and http_request_info.headers:
             for name, value in http_request_info.headers.items():
-                # case-insensitive check for allowed headers
                 if name.lower() in self._forward_headers:
                     headers[name] = value
 
         body = arguments if arguments else None
 
         try:
-            logger.debug(f"Making {method.upper()} request to {path}")
             response = await self._request(client, method, path, query, headers, body)
 
-            # TODO: Better typing for the AsyncClientProtocol. It should return a ResponseProtocol that has a json() method that returns a dict/list/etc.
+            # Create a textual view of the endpoint response (always available)
             try:
-                result = response.json()
-                result_text = json.dumps(result, indent=2, ensure_ascii=False)
-            except json.JSONDecodeError:
-                if hasattr(response, "text"):
-                    result_text = response.text
-                else:
-                    result_text = response.content
+                result_json = response.json()
+                result_text = json.dumps(result_json, indent=2, ensure_ascii=False)
+            except Exception:
+                # fallback if not JSON
+                result_text = getattr(response, "text", "") or str(getattr(response, "content", ""))
 
-            # If not raising an exception, the MCP server will return the result as a regular text response, without marking it as an error.
-            # TODO: Use a raise_for_status() method on the response (it needs to also be implemented in the AsyncClientProtocol)
+            # Treat HTTP errors as MCP tool errors
             if 400 <= response.status_code < 600:
-                raise Exception(
-                    f"Error calling {tool_name}. Status code: {response.status_code}. Response: {response.text}"
+                return types.CallToolResult(
+                    content=[types.TextContent(type="text", text=result_text)],
+                    isError=True,
                 )
 
-            try:
-                return [types.TextContent(type="text", text=result_text)]
-            except ValueError:
-                return [types.TextContent(type="text", text=result_text)]
+            # Return Apps-style CallToolResult:
+            # - content: always a text content of endpoint response
+            # - structuredContent: only if provided in operation_map
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=result_text)],
+                structuredContent=structured_content,
+                isError=False,
+            )
 
         except Exception as e:
             logger.exception(f"Error calling {tool_name}")
-            raise e
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=str(e))],
+                isError=True,
+            )
 
     async def _request(
         self,

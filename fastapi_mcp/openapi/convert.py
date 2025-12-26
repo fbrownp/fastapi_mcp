@@ -7,8 +7,8 @@ import mcp.types as types
 from .utils import (
     clean_schema_for_display,
     generate_example_from_schema,
-    resolve_schema_references,
     get_single_param_type_from_schema,
+    resolve_schema_references,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,17 +50,20 @@ def convert_openapi_to_mcp_tools(
             operation_id = operation.get("operationId")
             metadata = operation.get("_meta")
             annotations = operation.get("annotations")
+            structured_content = operation.get("structured_content")
+            if not structured_content:
+                structured_content = None
             if not metadata:
                 metadata = {
-                    'openai/toolInvocation/invoking': 'Buscando',
-                    'openai/toolInvocation/invoked': 'Revisado',
-                    'openai/widgetAccessible': False,
+                    "openai/toolInvocation/invoking": "Buscando",
+                    "openai/toolInvocation/invoked": "Revisado",
+                    "openai/widgetAccessible": False,
                 }
             if not annotations:
                 annotations = {
-                    'destructiveHint': False,
-                    'openWorldHint': False,
-                    'readOnlyHint': True,
+                    "destructiveHint": False,
+                    "openWorldHint": False,
+                    "readOnlyHint": True,
                 }
             if not operation_id:
                 logger.warning(f"Skipping operation with no operationId: {operation}")
@@ -72,6 +75,7 @@ def convert_openapi_to_mcp_tools(
                 "method": method,
                 "parameters": operation.get("parameters", []),
                 "request_body": operation.get("requestBody", {}),
+                "structured_content": structured_content,
             }
 
             summary = operation.get("summary", "")
@@ -274,8 +278,13 @@ def convert_openapi_to_mcp_tools(
                 input_schema["required"] = required_props
 
             # Create the MCP tool definition
-            tool = types.Tool(name=operation_id, description=tool_description, inputSchema=input_schema,
-                              _meta = metadata, annotations=annotations)
+            tool = types.Tool(
+                name=operation_id,
+                description=tool_description,
+                inputSchema=input_schema,
+                _meta=metadata,
+                annotations=annotations,  # type: ignore
+            )
 
             tools.append(tool)
 
