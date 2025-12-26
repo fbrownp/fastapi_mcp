@@ -50,9 +50,9 @@ def convert_openapi_to_mcp_tools(
             operation_id = operation.get("operationId")
             metadata = operation.get("_meta")
             annotations = operation.get("annotations")
-            structured_content = operation.get("structured_content")
-            if not structured_content:
-                structured_content = None
+            structured_content_keys = operation.get("structured_content_keys")
+            if not structured_content_keys:
+                structured_content_keys = None
             if not metadata:
                 metadata = {
                     "openai/toolInvocation/invoking": "Buscando",
@@ -75,7 +75,7 @@ def convert_openapi_to_mcp_tools(
                 "method": method,
                 "parameters": operation.get("parameters", []),
                 "request_body": operation.get("requestBody", {}),
-                "structured_content": structured_content,
+                "structured_content_keys": structured_content_keys,
             }
 
             summary = operation.get("summary", "")
