@@ -491,7 +491,8 @@ class FastApiMCP:
         path: str = operation["path"]
         method: str = operation["method"]
         parameters: List[Dict[str, Any]] = operation.get("parameters", [])
-        structured_content_keys: Dict[str, Any] = operation.get("structured_content_keys", [])
+        structured_content_keys: List[str] = operation.get("structured_content_keys", [])
+        metadata: Dict[str, Any] = operation.get("_meta", [])
         arguments = arguments.copy() if arguments else {}
 
         # --- existing param mapping logic unchanged ---
@@ -557,6 +558,7 @@ class FastApiMCP:
                 content=[types.TextContent(type="text", text=result_text)],
                 structuredContent=structured_content,
                 isError=False,
+                _meta=metadata,
             )
 
         except Exception as e:

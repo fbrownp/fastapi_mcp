@@ -76,6 +76,7 @@ def convert_openapi_to_mcp_tools(
                 "parameters": operation.get("parameters", []),
                 "request_body": operation.get("requestBody", {}),
                 "structured_content_keys": structured_content_keys,
+                "_meta": metadata,
             }
 
             summary = operation.get("summary", "")
