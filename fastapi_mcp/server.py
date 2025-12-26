@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Any, Dict, List, Literal, Optional, Sequence, Union
+from typing import Any, Dict, List, Literal, Optional, Sequence
 
 import httpx
 import mcp.types as types
@@ -9,6 +9,7 @@ from fastapi.openapi.utils import get_openapi
 from mcp.server.lowlevel.server import Server
 from typing_extensions import Annotated, Doc
 
+from fastapi_mcp.extractor import extract_structured_content
 from fastapi_mcp.openapi.convert import convert_openapi_to_mcp_tools
 from fastapi_mcp.transport.http import FastApiHttpSessionManager
 from fastapi_mcp.transport.sse import FastApiSseTransport
@@ -490,7 +491,7 @@ class FastApiMCP:
         path: str = operation["path"]
         method: str = operation["method"]
         parameters: List[Dict[str, Any]] = operation.get("parameters", [])
-        structured_content: Dict[str, Any] = operation.get("structured_content", [])
+        structured_content_keys: Dict[str, Any] = operation.get("structured_content_keys", [])
         arguments = arguments.copy() if arguments else {}
 
         # --- existing param mapping logic unchanged ---
@@ -534,6 +535,7 @@ class FastApiMCP:
                 result_text = json.dumps(result_json, indent=2, ensure_ascii=False)
             except Exception:
                 # fallback if not JSON
+                result_json = None
                 result_text = getattr(response, "text", "") or str(getattr(response, "content", ""))
 
             # Treat HTTP errors as MCP tool errors
@@ -542,7 +544,12 @@ class FastApiMCP:
                     content=[types.TextContent(type="text", text=result_text)],
                     isError=True,
                 )
-
+            structured_content = None
+            if isinstance(result_json, dict) and structured_content_keys:
+                structured_content = extract_structured_content(
+                    result_json,
+                    structured_content_keys,
+                )
             # Return Apps-style CallToolResult:
             # - content: always a text content of endpoint response
             # - structuredContent: only if provided in operation_map
