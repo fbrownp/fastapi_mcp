@@ -551,6 +551,12 @@ class FastApiMCP:
                     result_json,
                     structured_content_keys,
                 )
+            if isinstance(result_json, dict) and result_json.__contains__("text"):
+                result_text = extract_structured_content(
+                    result_json,
+                    ["text"],
+                )["text"]
+
             # Return Apps-style CallToolResult:
             # - content: always a text content of endpoint response
             # - structuredContent: only if provided in operation_map
