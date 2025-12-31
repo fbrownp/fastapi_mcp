@@ -542,7 +542,7 @@ class FastApiMCP:
             # Treat HTTP errors as MCP tool errors
             if 400 <= response.status_code < 600:
                 return types.CallToolResult(
-                    content=[types.TextContent(type="text", text=result_text)],
+                    content=[types.TextContent(type="text", text=result_text, _meta=metadata)],
                     isError=True,
                 )
             structured_content = None
@@ -561,7 +561,7 @@ class FastApiMCP:
             # - content: always a text content of endpoint response
             # - structuredContent: only if provided in operation_map
             return types.CallToolResult(
-                content=[types.TextContent(type="text", text=result_text)],
+                content=[types.TextContent(type="text", text=result_text, _meta=metadata)],
                 structuredContent=structured_content,
                 isError=False,
                 _meta=metadata,
@@ -570,7 +570,7 @@ class FastApiMCP:
         except Exception as e:
             logger.exception(f"Error calling {tool_name}")
             return types.CallToolResult(
-                content=[types.TextContent(type="text", text=str(e))],
+                content=[types.TextContent(type="text", text=str(e), _meta=metadata)],
                 isError=True,
             )
 
