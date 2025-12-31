@@ -541,9 +541,28 @@ class FastApiMCP:
 
             # Treat HTTP errors as MCP tool errors
             if 400 <= response.status_code < 600:
+                error_message = result_text
+                error_meta = metadata.copy() if metadata else {}
+
+                # Try to extract custom detail message
+                if result_json and isinstance(result_json, dict):
+                    if "detail" in result_json:
+                        detail = result_json["detail"]
+                        # Handle string detail (your HTTPException)
+                        if isinstance(detail, str):
+                            error_message = detail
+                        # Handle list detail (Pydantic validation)
+                        elif isinstance(detail, list) and len(detail) > 0:
+                            error_message = detail[0].get("msg", result_text)
+
+                            # Remove widget metadata for validation errors
+                            if error_meta.get("openai/outputTemplate"):
+                                error_meta.pop("openai/outputTemplate", None)
+                            error_meta["openai/widgetAccessible"] = False
+
                 return types.CallToolResult(
-                    content=[types.TextContent(type="text", text=result_text)],
-                    _meta=metadata,
+                    content=[types.TextContent(type="text", text=error_message)],
+                    _meta=error_meta,
                     isError=True,
                 )
             structured_content = None
