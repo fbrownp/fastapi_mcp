@@ -7,6 +7,7 @@ from fastapi_mcp.openapi.utils import (
     clean_schema_for_display,
     generate_example_from_schema,
     get_single_param_type_from_schema,
+    resolve_schema_references,
 )
 
 
@@ -422,3 +423,106 @@ def test_body_params_edge_cases(complex_fastapi_app: FastAPI):
     if "items" in properties:
         item_props = properties["items"]["items"]["properties"]
         assert "total" in item_props
+
+
+def test_resolve_schema_references_self_recursive_model():
+    """A schema whose $ref points back to itself (e.g. a tree-shaped model with
+    children of its own type) must terminate instead of inlining forever."""
+    reference_schema = {
+        "components": {
+            "schemas": {
+                "TreeNode": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "children": {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/TreeNode"},
+                        },
+                    },
+                }
+            }
+        }
+    }
+    schema_part = {"$ref": "#/components/schemas/TreeNode"}
+
+    resolved = resolve_schema_references(schema_part, reference_schema)
+
+    assert resolved["type"] == "object"
+    assert resolved["properties"]["name"] == {"type": "string"}
+    # One level is inlined; the self-reference is left as a $ref rather than
+    # being inlined again, which is what breaks the infinite recursion.
+    child_items = resolved["properties"]["children"]["items"]
+    assert child_items == {"$ref": "#/components/schemas/TreeNode"}
+
+
+def test_resolve_schema_references_mutually_recursive_models():
+    """Two models that reference each other (A -> B -> A) must also terminate."""
+    reference_schema = {
+        "components": {
+            "schemas": {
+                "Author": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "books": {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/Book"},
+                        },
+                    },
+                },
+                "Book": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "author": {"$ref": "#/components/schemas/Author"},
+                    },
+                },
+            }
+        }
+    }
+    schema_part = {"$ref": "#/components/schemas/Author"}
+
+    resolved = resolve_schema_references(schema_part, reference_schema)
+
+    book_item = resolved["properties"]["books"]["items"]
+    assert book_item["properties"]["title"] == {"type": "string"}
+    # Book -> Author is where the cycle closes; it stays a $ref.
+    assert book_item["properties"]["author"] == {"$ref": "#/components/schemas/Author"}
+
+
+def test_convert_openapi_to_mcp_tools_with_self_recursive_model():
+    """End-to-end regression test for a tree-shaped response model: this used to
+    raise RecursionError inside convert_openapi_to_mcp_tools (via
+    resolve_schema_references) because self-referential $refs were inlined with
+    no cycle detection."""
+    from typing import List
+
+    from pydantic import BaseModel
+
+    class CatalogSection(BaseModel):
+        section_key: str
+        children: List["CatalogSection"] = []
+
+    CatalogSection.model_rebuild()
+
+    class CatalogResponse(BaseModel):
+        sections: List[CatalogSection] = []
+
+    app = FastAPI()
+
+    @app.get("/catalog", operation_id="get_catalog", response_model=CatalogResponse)
+    def get_catalog() -> CatalogResponse:
+        return CatalogResponse()
+
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        openapi_version=app.openapi_version,
+        routes=app.routes,
+    )
+
+    tools, operation_map = convert_openapi_to_mcp_tools(openapi_schema, describe_full_response_schema=True)
+
+    assert "get_catalog" in operation_map
+    assert len(tools) == 1

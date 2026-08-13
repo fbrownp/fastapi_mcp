@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any, Dict, FrozenSet, Optional
 
 
 def get_single_param_type_from_schema(param_schema: Dict[str, Any]) -> str:
@@ -16,17 +16,28 @@ def get_single_param_type_from_schema(param_schema: Dict[str, Any]) -> str:
     return param_schema.get("type", "string")
 
 
-def resolve_schema_references(schema_part: Dict[str, Any], reference_schema: Dict[str, Any]) -> Dict[str, Any]:
+def resolve_schema_references(
+    schema_part: Dict[str, Any],
+    reference_schema: Dict[str, Any],
+    _seen_refs: Optional[FrozenSet[str]] = None,
+) -> Dict[str, Any]:
     """
     Resolve schema references in OpenAPI schemas.
 
     Args:
         schema_part: The part of the schema being processed that may contain references
         reference_schema: The complete schema used to resolve references from
+        _seen_refs: Internal use only. $ref paths already inlined along the current
+            recursion branch. Self- or mutually-referential models (e.g. a tree-shaped
+            schema whose "children" field references its own type) would otherwise
+            inline the same $ref forever and blow the stack; once a $ref reappears on
+            its own branch it is left as a $ref instead of being inlined again.
 
     Returns:
         The schema with references resolved
     """
+    seen_refs = _seen_refs or frozenset()
+
     # Make a copy to avoid modifying the input schema
     schema_part = schema_part.copy()
 
@@ -34,7 +45,7 @@ def resolve_schema_references(schema_part: Dict[str, Any], reference_schema: Dic
     if "$ref" in schema_part:
         ref_path = schema_part["$ref"]
         # Standard OpenAPI references are in the format "#/components/schemas/ModelName"
-        if ref_path.startswith("#/components/schemas/"):
+        if ref_path.startswith("#/components/schemas/") and ref_path not in seen_refs:
             model_name = ref_path.split("/")[-1]
             if "components" in reference_schema and "schemas" in reference_schema["components"]:
                 if model_name in reference_schema["components"]["schemas"]:
@@ -43,15 +54,17 @@ def resolve_schema_references(schema_part: Dict[str, Any], reference_schema: Dic
                     # Remove the $ref key and merge with the original schema
                     schema_part.pop("$ref")
                     schema_part.update(ref_schema)
+                    seen_refs = seen_refs | {ref_path}
 
     # Recursively resolve references in all dictionary values
     for key, value in schema_part.items():
         if isinstance(value, dict):
-            schema_part[key] = resolve_schema_references(value, reference_schema)
+            schema_part[key] = resolve_schema_references(value, reference_schema, seen_refs)
         elif isinstance(value, list):
             # Only process list items that are dictionaries since only they can contain refs
             schema_part[key] = [
-                resolve_schema_references(item, reference_schema) if isinstance(item, dict) else item for item in value
+                resolve_schema_references(item, reference_schema, seen_refs) if isinstance(item, dict) else item
+                for item in value
             ]
 
     return schema_part
