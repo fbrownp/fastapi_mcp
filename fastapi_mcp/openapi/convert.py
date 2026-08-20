@@ -8,6 +8,7 @@ from .utils import (
     clean_schema_for_display,
     generate_example_from_schema,
     get_single_param_type_from_schema,
+    is_union_schema,
     resolve_schema_references,
 )
 
@@ -243,7 +244,12 @@ def convert_openapi_to_mcp_tools(
                 if param_desc:
                     properties[param_name]["description"] = param_desc
 
-                if "type" not in properties[param_name]:
+                # A union schema (e.g. `str | None` -> anyOf[string, null]) already
+                # validates on its own. Adding a flattened top-level "type" next to it
+                # would be enforced *conjunctively* with the anyOf by JSON Schema, so an
+                # explicit null argument -- which the union deliberately allows -- would
+                # be rejected by the MCP SDK's input validation before the endpoint runs.
+                if "type" not in properties[param_name] and not is_union_schema(param_schema):
                     properties[param_name]["type"] = get_single_param_type_from_schema(param_schema)
 
                 if "default" in param_schema:
@@ -263,7 +269,9 @@ def convert_openapi_to_mcp_tools(
                 if param_desc:
                     properties[param_name]["description"] = param_desc
 
-                if "type" not in properties[param_name]:
+                # Same as for query parameters: never stack a flattened "type" on top
+                # of a union schema, or its null branch becomes unsatisfiable.
+                if "type" not in properties[param_name] and not is_union_schema(param_schema):
                     properties[param_name]["type"] = get_single_param_type_from_schema(param_schema)
 
                 if "default" in param_schema:

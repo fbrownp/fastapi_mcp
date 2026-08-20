@@ -177,16 +177,20 @@ def test_parameter_handling(complex_fastapi_app: FastAPI):
     assert "product_id" not in properties  # This is from get_product, not list_products
 
     assert "category" in properties
-    assert properties["category"].get("type") == "string"  # Enum converted to string
+    # Nullable enum (`ProductCategory | None`): the anyOf union is preserved as-is
+    # and no flattened sibling "type" is added — a top-level "type" next to the
+    # anyOf would make an explicit null argument fail MCP input validation.
+    assert "anyOf" in properties["category"]
+    assert "type" not in properties["category"]
     assert "description" in properties["category"]
     assert "Filter by product category" in properties["category"]["description"]
 
     assert "min_price" in properties
-    assert properties["min_price"].get("type") == "number"
+    # `Optional[float]` query param: union preserved, no flattened sibling type.
+    assert "anyOf" in properties["min_price"]
+    assert "type" not in properties["min_price"]
     assert "description" in properties["min_price"]
     assert "Minimum price filter" in properties["min_price"]["description"]
-    if "minimum" in properties["min_price"]:
-        assert properties["min_price"]["minimum"] > 0  # gt=0 in Query param
 
     assert "in_stock_only" in properties
     assert properties["in_stock_only"].get("type") == "boolean"
@@ -205,7 +209,9 @@ def test_parameter_handling(complex_fastapi_app: FastAPI):
         assert properties["size"]["maximum"] <= 100  # le=100 in Query param
 
     assert "tag" in properties
-    assert properties["tag"].get("type") == "array"
+    # `Optional[List[str]]` query param: union preserved, no flattened sibling type.
+    assert "anyOf" in properties["tag"]
+    assert "type" not in properties["tag"]
 
     required = list_products_tool.inputSchema.get("required", [])
     assert "page" not in required  # Has default value
@@ -417,8 +423,10 @@ def test_body_params_edge_cases(complex_fastapi_app: FastAPI):
     assert properties["customer_id"]["title"] == "customer_id"
 
     assert "notes" in properties
-    assert "type" in properties["notes"]
-    assert properties["notes"]["type"] in ["string", "object"]  # Default should be either string or object
+    # `notes` is `str | None`: the anyOf union survives conversion untouched and no
+    # flattened "type" is stacked on it, so an explicit null stays valid.
+    assert "anyOf" in properties["notes"]
+    assert "type" not in properties["notes"]
 
     if "items" in properties:
         item_props = properties["items"]["items"]["properties"]
@@ -526,3 +534,83 @@ def test_convert_openapi_to_mcp_tools_with_self_recursive_model():
 
     assert "get_catalog" in operation_map
     assert len(tools) == 1
+
+
+def test_nullable_body_field_accepts_explicit_null():
+    """A `str | None` body field must accept an explicit null argument.
+
+    The MCP SDK jsonschema-validates tool arguments against the generated
+    inputSchema before the endpoint runs. Pydantic emits `str | None` as
+    anyOf[string, null]; stacking a flattened top-level `"type": "string"`
+    next to that anyOf makes the null branch unsatisfiable (JSON Schema
+    enforces sibling keywords conjunctively), so a model sending
+    `{"keyword": null}` fails with "None is not of type 'string'" — observed
+    killing agent turns in production.
+    """
+    from typing import Optional
+
+    import jsonschema
+    from pydantic import BaseModel, Field
+
+    class SearchRequest(BaseModel):
+        keyword: Optional[str] = Field(default=None, max_length=500)
+
+    app = FastAPI()
+
+    @app.post("/search", operation_id="search")
+    def search(body: SearchRequest) -> dict:
+        return {}
+
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        openapi_version=app.openapi_version,
+        routes=app.routes,
+    )
+
+    tools, _ = convert_openapi_to_mcp_tools(openapi_schema)
+    input_schema = next(tool for tool in tools if tool.name == "search").inputSchema
+    keyword_schema = input_schema["properties"]["keyword"]
+
+    # The union must be preserved without a conflicting flattened sibling type.
+    assert "anyOf" in keyword_schema
+    assert "type" not in keyword_schema
+
+    # The production contract: what the MCP SDK actually does with arguments.
+    jsonschema.validate(instance={"keyword": None}, schema=input_schema)
+    jsonschema.validate(instance={"keyword": "agua"}, schema=input_schema)
+    jsonschema.validate(instance={}, schema=input_schema)
+
+    # The union's own constraints still apply.
+    import pytest
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance={"keyword": 123}, schema=input_schema)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance={"keyword": "x" * 501}, schema=input_schema)
+
+
+def test_non_union_body_field_still_gets_flattened_type():
+    """Plain fields keep the existing behavior: a top-level type is ensured."""
+    from pydantic import BaseModel
+
+    class PlainRequest(BaseModel):
+        name: str
+
+    app = FastAPI()
+
+    @app.post("/plain", operation_id="plain")
+    def plain(body: PlainRequest) -> dict:
+        return {}
+
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        openapi_version=app.openapi_version,
+        routes=app.routes,
+    )
+
+    tools, _ = convert_openapi_to_mcp_tools(openapi_schema)
+    input_schema = next(tool for tool in tools if tool.name == "plain").inputSchema
+    assert input_schema["properties"]["name"]["type"] == "string"
+    assert input_schema["required"] == ["name"]

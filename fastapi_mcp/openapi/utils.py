@@ -1,6 +1,19 @@
 from typing import Any, Dict, FrozenSet, Optional
 
 
+def is_union_schema(param_schema: Dict[str, Any]) -> bool:
+    """
+    Whether the schema is a union (anyOf/oneOf/allOf) that must be preserved as-is.
+
+    A union like `str | None` (anyOf[string, null]) already validates correctly on
+    its own, including its null branch. Callers must not add a flattened top-level
+    "type" next to it: JSON Schema enforces sibling keywords conjunctively, so
+    `{"anyOf": [...], "type": "string"}` rejects an explicit null even though the
+    anyOf allows it.
+    """
+    return any(key in param_schema for key in ("anyOf", "oneOf", "allOf"))
+
+
 def get_single_param_type_from_schema(param_schema: Dict[str, Any]) -> str:
     """
     Get the type of a parameter from the schema.
