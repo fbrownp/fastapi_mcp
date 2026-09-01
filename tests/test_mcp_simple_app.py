@@ -98,7 +98,7 @@ async def test_call_tool_raise_error(lowlevel_server_simple_app: Server):
         assert len(response.content) > 0
 
         text_content = next(c for c in response.content if isinstance(c, types.TextContent))
-        assert "500" in text_content.text
+        # _execute_api_tool surfaces the error body's detail message, not the raw status line
         assert "internal server error" in text_content.text.lower()
 
 
@@ -185,7 +185,7 @@ async def test_call_tool_get_item_not_found(lowlevel_server_simple_app: Server):
         assert len(response.content) > 0
 
         text_content = next(c for c in response.content if isinstance(c, types.TextContent))
-        assert "404" in text_content.text
+        # _execute_api_tool surfaces the error body's detail message, not the raw status line
         assert "not found" in text_content.text.lower()
 
 

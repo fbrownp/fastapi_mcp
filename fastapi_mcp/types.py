@@ -8,7 +8,6 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from pydantic.main import IncEx
 from fastapi import params
 
 
@@ -132,38 +131,14 @@ class OAuthMetadata(BaseType):
             raise ValueError("authorization_endpoint is required when authorization_code grant type is supported")
         return self
 
-    def model_dump(
-        self,
-        *,
-        mode: Literal["json", "python"] | str = "python",
-        include: IncEx | None = None,
-        exclude: IncEx | None = None,
-        context: Any | None = None,
-        by_alias: bool = False,
-        exclude_unset: bool = True,
-        exclude_defaults: bool = False,
-        exclude_none: bool = True,
-        round_trip: bool = False,
-        warnings: bool | Literal["none", "warn", "error"] = True,
-        serialize_as_any: bool = False,
-    ) -> dict[str, Any]:
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
         # Always exclude unset and None fields, since clients don't take it well when
-        # OAuth metadata fields are present but empty.
-        exclude_unset = True
-        exclude_none = True
-        return super().model_dump(
-            mode=mode,
-            include=include,
-            exclude=exclude,
-            context=context,
-            by_alias=by_alias,
-            exclude_unset=exclude_unset,
-            exclude_defaults=exclude_defaults,
-            exclude_none=exclude_none,
-            round_trip=round_trip,
-            warnings=warnings,
-            serialize_as_any=serialize_as_any,
-        )
+        # OAuth metadata fields are present but empty. Accept whatever keyword
+        # arguments the installed pydantic version supports instead of pinning
+        # its full signature, which drifts between releases.
+        kwargs["exclude_unset"] = True
+        kwargs["exclude_none"] = True
+        return super().model_dump(**kwargs)
 
 
 OAuthMetadataDict = Annotated[Union[Dict[str, Any], OAuthMetadata], OAuthMetadata]

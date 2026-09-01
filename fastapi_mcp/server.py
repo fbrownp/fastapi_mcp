@@ -322,6 +322,30 @@ class FastApiMCP:
                 """
             ),
         ] = "/mcp",
+        stateless: Annotated[
+            bool,
+            Doc(
+                """
+                Run the Streamable HTTP transport in stateless mode: every request is handled by a
+                fresh transport and no `mcp-session-id` is issued or required.
+
+                Set this to True when the app is deployed behind a load balancer with more than one
+                replica or worker process (e.g. Azure Container Apps, gunicorn/uvicorn workers).
+                The default stateful mode keeps sessions in one process's memory, so a follow-up
+                request routed to a different replica is rejected with a session error before it
+                ever reaches your endpoints.
+                """
+            ),
+        ] = False,
+        json_response: Annotated[
+            bool,
+            Doc(
+                """
+                Respond to POST requests with plain JSON bodies instead of an SSE stream.
+                Defaults to True.
+                """
+            ),
+        ] = True,
     ) -> None:
         """
         Mount the MCP server with HTTP transport to **any** FastAPI app or APIRouter.
@@ -340,7 +364,9 @@ class FastApiMCP:
 
         assert isinstance(router, (FastAPI, APIRouter)), f"Invalid router type: {type(router)}"
 
-        http_transport = FastApiHttpSessionManager(mcp_server=self.server)
+        http_transport = FastApiHttpSessionManager(
+            mcp_server=self.server, stateless=stateless, json_response=json_response
+        )
         dependencies = self._auth_config.dependencies if self._auth_config else None
 
         self._register_mcp_endpoints_http(router, http_transport, mount_path, dependencies)
@@ -537,7 +563,15 @@ class FastApiMCP:
             except Exception:
                 # fallback if not JSON
                 result_json = None
-                result_text = getattr(response, "text", "") or str(getattr(response, "content", ""))
+                result_text = getattr(response, "text", "")
+                if not result_text:
+                    raw_content = getattr(response, "content", b"")
+                    if isinstance(raw_content, (bytes, bytearray)):
+                        # An empty body (e.g. 204 No Content) must stay empty,
+                        # not render as the repr "b''".
+                        result_text = raw_content.decode(errors="replace")
+                    elif raw_content:
+                        result_text = str(raw_content)
 
             # Treat HTTP errors as MCP tool errors
             if 400 <= response.status_code < 600:

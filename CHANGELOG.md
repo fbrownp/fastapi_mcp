@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `mount_http(stateless=...)` and `FastApiHttpSessionManager(stateless=...)`: opt-in stateless Streamable HTTP mode. Every request is handled by a fresh transport and no `mcp-session-id` is issued or required, making the server safe behind load balancers with multiple replicas/workers (e.g. Azure Container Apps), where in-memory sessions caused follow-up requests routed to a different replica to fail.
+- `mount_http(json_response=...)` passthrough to the underlying transport.
+
+### Fixed
+- Error responses from the Streamable HTTP transport are now always valid JSON-RPC. Older `mcp` SDK versions reject an unknown session with a plain-text 400 body ("Bad Request: No valid session ID provided"); MCP proxies that expect JSON-RPC on the wire (such as the Anthropic connector proxy) could not parse it and surfaced an opaque `-32600 "Anthropic Proxy: Invalid content from server"` to the client. Unknown sessions are also remapped to 404 so spec-compliant clients re-initialize transparently.
+- Top-level union request bodies (e.g. `body: Annotated[Union[A, B], Field(discriminator='scope')]`) no longer convert to an empty tool input schema. The tool now advertises the union branches (with their discriminator) plus merged top-level property hints, so schema-abiding clients stop calling such tools with `{}` and getting `Field required` validation errors.
+- Empty response bodies (e.g. 204 No Content) no longer render as the bytes repr `b''` in tool result text.
+- Bumped the `mcp` dependency floor to `>=1.21.2,<2`. Older versions lack the `CallToolResult` passthrough in the `call_tool` handler and mangle every tool result into a "20 validation errors for CallToolResult" error.
+
 ## [0.4.0]
 
 🚀 **FastAPI-MCP now supports Streamable HTTP transport.**
