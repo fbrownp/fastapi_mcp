@@ -1,4 +1,66 @@
+import copy
 from typing import Any, Dict, FrozenSet, Optional
+
+
+def build_union_body_input_schema(schema: Dict[str, Any], operation_id: str) -> Dict[str, Any]:
+    """
+    Build a tool input schema for a top-level union request body (oneOf/anyOf).
+
+    FastAPI emits a discriminated Union body (e.g. `body: Annotated[Union[A, B],
+    Field(discriminator='scope')]`) as a schema with oneOf/anyOf branches and no
+    top-level "properties". Flattening only "properties" would advertise the tool
+    as taking no arguments, so schema-abiding clients call it with `{}` and the
+    endpoint rejects the call with a validation error.
+
+    The returned schema keeps the union branches (and discriminator) for exact
+    validation, and additionally merges the branches' properties at the top level
+    as a hint for clients that ignore oneOf/anyOf. Only keys required by *every*
+    branch are marked required. The discriminator property is widened to an enum
+    of all its tag values, since each branch constrains it to a single constant.
+    """
+    variant_key = "oneOf" if "oneOf" in schema else "anyOf"
+    variants = [v for v in schema.get(variant_key, []) if isinstance(v, dict)]
+
+    merged_properties: Dict[str, Any] = {}
+    merged_required: Optional[FrozenSet[str]] = None
+    for variant in variants:
+        variant_properties = variant.get("properties", {})
+        for prop_name, prop_schema in variant_properties.items():
+            if prop_name not in merged_properties:
+                merged_properties[prop_name] = copy.deepcopy(prop_schema)
+            elif merged_properties[prop_name] != prop_schema:
+                # Branches disagree on this property's shape. Keep the key visible
+                # as a hint, but leave validation to the union branches so a value
+                # that is valid for one branch is never rejected by the merged hint.
+                merged_properties[prop_name] = {"title": prop_name}
+        variant_required = frozenset(variant.get("required", variant_properties.keys()))
+        merged_required = variant_required if merged_required is None else merged_required & variant_required
+
+    discriminator = schema.get("discriminator")
+    if discriminator:
+        tag_name = discriminator.get("propertyName")
+        tag_values = list(discriminator.get("mapping", {}).keys())
+        if not tag_values:
+            for variant in variants:
+                tag_schema = variant.get("properties", {}).get(tag_name, {})
+                if "const" in tag_schema:
+                    tag_values.append(tag_schema["const"])
+                else:
+                    tag_values.extend(tag_schema.get("enum", []))
+        if tag_name and tag_values:
+            merged_properties[tag_name] = {"type": "string", "enum": tag_values, "title": tag_name}
+
+    input_schema: Dict[str, Any] = {
+        "type": "object",
+        "properties": merged_properties,
+        "title": f"{operation_id}Arguments",
+        variant_key: copy.deepcopy(variants),
+    }
+    if discriminator:
+        input_schema["discriminator"] = copy.deepcopy(discriminator)
+    if merged_required:
+        input_schema["required"] = sorted(merged_required)
+    return input_schema
 
 
 def is_union_schema(param_schema: Dict[str, Any]) -> bool:

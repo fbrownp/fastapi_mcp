@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Tuple
 import mcp.types as types
 
 from .utils import (
+    build_union_body_input_schema,
     clean_schema_for_display,
     generate_example_from_schema,
     get_single_param_type_from_schema,
@@ -193,6 +194,7 @@ def convert_openapi_to_mcp_tools(
                     header_params.append((param_name, param))
 
             # Process request body if present
+            union_body_schema = None
             request_body = operation.get("requestBody", {})
             if request_body and "content" in request_body:
                 content_type = next(iter(request_body["content"]), None)
@@ -211,6 +213,12 @@ def convert_openapi_to_mcp_tools(
                                     },
                                 )
                             )
+                    elif "oneOf" in schema or "anyOf" in schema:
+                        # A top-level union body (e.g. a discriminated Union of Pydantic
+                        # models) has no "properties" key, only oneOf/anyOf branches. It
+                        # must not fall through to an empty input schema: clients that
+                        # honor the schema would then call the tool with no arguments.
+                        union_body_schema = schema
 
             # Create input schema properties for all parameters
             properties = {}
@@ -281,10 +289,18 @@ def convert_openapi_to_mcp_tools(
                     required_props.append(param_name)
 
             # Create a proper input schema for the tool
-            input_schema = {"type": "object", "properties": properties, "title": f"{operation_id}Arguments"}
+            if union_body_schema is not None and not properties:
+                input_schema = build_union_body_input_schema(union_body_schema, operation_id)
+            else:
+                if union_body_schema is not None:
+                    logger.warning(
+                        f"Operation {operation_id} mixes a union request body with other "
+                        "parameters; the union body is not represented in the tool's input schema."
+                    )
+                input_schema = {"type": "object", "properties": properties, "title": f"{operation_id}Arguments"}
 
-            if required_props:
-                input_schema["required"] = required_props
+                if required_props:
+                    input_schema["required"] = required_props
 
             # Create the MCP tool definition
             tool = types.Tool(

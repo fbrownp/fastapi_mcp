@@ -1,3 +1,4 @@
+import json
 import logging
 import asyncio
 
@@ -20,11 +21,18 @@ class FastApiHttpSessionManager:
         event_store: EventStore | None = None,
         json_response: bool = True,  # Default to JSON for HTTP transport
         security_settings: TransportSecuritySettings | None = None,
+        stateless: bool = False,
     ):
         self.mcp_server = mcp_server
         self.event_store = event_store
         self.json_response = json_response
         self.security_settings = security_settings
+        # Stateless mode handles every request with a fresh transport and never
+        # issues an mcp-session-id. Required when the app runs behind a load
+        # balancer with multiple replicas/workers (e.g. Azure Container Apps):
+        # stateful sessions live in one process's memory, so a follow-up POST
+        # routed to a different replica is rejected before reaching the tools.
+        self.stateless = stateless
         self._session_manager: StreamableHTTPSessionManager | None = None
         self._manager_task: asyncio.Task | None = None
         self._manager_started = False
@@ -53,7 +61,7 @@ class FastApiHttpSessionManager:
                 app=self.mcp_server,
                 event_store=self.event_store,
                 json_response=self.json_response,
-                stateless=False,  # Always support sessions, but they're optional
+                stateless=self.stateless,
                 security_settings=self.security_settings,
             )
 
@@ -114,6 +122,13 @@ class FastApiHttpSessionManager:
 
             # Convert the captured ASGI response to a FastAPI Response
             headers_dict = {name.decode(): value.decode() for name, value in response_headers}
+            # The body may be rewritten below, so let Starlette recompute the length.
+            headers_dict.pop("content-length", None)
+
+            if response_status >= 400:
+                response_status, response_body, headers_dict = self._normalize_error_response(
+                    response_status, response_body, headers_dict
+                )
 
             return Response(
                 content=response_body,
@@ -124,6 +139,42 @@ class FastApiHttpSessionManager:
         except Exception:
             logger.exception("Error in StreamableHTTPSessionManager")
             raise HTTPException(status_code=500, detail="Internal server error")
+
+    @staticmethod
+    def _normalize_error_response(
+        status: int, body: bytes, headers: dict[str, str]
+    ) -> tuple[int, bytes, dict[str, str]]:
+        """
+        Guarantee that error responses carry a JSON-RPC body.
+
+        The underlying StreamableHTTP transport rejects some requests with a
+        plain-text body and no Content-Type (e.g. 400 "Bad Request: No valid
+        session ID provided" when a session ID is unknown to this process).
+        MCP proxies that expect JSON-RPC on the wire (such as the Anthropic
+        connector proxy) fail to parse that and surface an opaque
+        -32600 "Invalid content from server" to the client instead of the real
+        reason. An unknown session is also remapped from 400 to 404 so
+        spec-compliant clients transparently re-initialize instead of erroring.
+        """
+        try:
+            json.loads(body.decode())
+            return status, body, headers  # Already a JSON body — pass through untouched.
+        except (UnicodeDecodeError, ValueError):
+            pass
+
+        message = body.decode(errors="replace").strip() or "Internal server error"
+        code = -32600
+        if "session" in message.lower():
+            # Per the Streamable HTTP spec, an expired/unknown session should
+            # yield 404 so the client starts a new session with `initialize`.
+            status = 404
+            code = -32001
+
+        error_body = json.dumps(
+            {"jsonrpc": "2.0", "id": "server-error", "error": {"code": code, "message": message}}
+        ).encode()
+        headers = {**headers, "content-type": "application/json"}
+        return status, error_body, headers
 
     async def shutdown(self) -> None:
         """Clean up the session manager and background task."""

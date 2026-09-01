@@ -614,3 +614,111 @@ def test_non_union_body_field_still_gets_flattened_type():
     input_schema = next(tool for tool in tools if tool.name == "plain").inputSchema
     assert input_schema["properties"]["name"]["type"] == "string"
     assert input_schema["required"] == ["name"]
+
+
+def test_discriminated_union_body_conversion():
+    """A top-level discriminated Union request body must not produce an empty input schema.
+
+    Regression test: endpoints declared as `body: Annotated[Union[A, B], Field(discriminator=...)]`
+    have a requestBody schema with oneOf branches and no top-level "properties". They used to
+    convert to `{"type": "object", "properties": {}}`, so schema-abiding clients called the tool
+    with `{}` and the endpoint rejected the call with a Pydantic validation error.
+    """
+    from enum import Enum
+    from typing import Annotated, Literal, Union
+
+    from pydantic import BaseModel, ConfigDict, Field
+
+    class NameScope(str, Enum):
+        seia = "nombre_proyecto"
+        uf = "nombre_uf"
+
+    class BaseQuery(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    class SeiaNameSearchQuery(BaseQuery):
+        scope: Literal[NameScope.seia]
+        name: str = Field(min_length=1, max_length=500)
+
+    class UfNameSearchQuery(BaseQuery):
+        scope: Literal[NameScope.uf]
+        name: str = Field(min_length=1, max_length=500)
+
+    NameSearchQuery = Annotated[
+        Union[SeiaNameSearchQuery, UfNameSearchQuery],
+        Field(discriminator="scope"),
+    ]
+
+    app = FastAPI()
+
+    @app.post("/search-by-name", operation_id="search-by-name")
+    async def search_by_name(body: NameSearchQuery):  # type: ignore[valid-type]
+        return {"documents": []}
+
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        openapi_version=app.openapi_version,
+        description=app.description,
+        routes=app.routes,
+    )
+
+    tools, operation_map = convert_openapi_to_mcp_tools(openapi_schema)
+    assert len(tools) == 1
+    input_schema = tools[0].inputSchema
+
+    # The union branches survive, with their discriminator, for exact validation
+    assert "oneOf" in input_schema
+    assert len(input_schema["oneOf"]) == 2
+    assert input_schema["discriminator"]["propertyName"] == "scope"
+
+    # Merged top-level property hints for clients that ignore oneOf
+    assert set(input_schema["properties"].keys()) == {"scope", "name"}
+    assert sorted(input_schema["properties"]["scope"]["enum"]) == ["nombre_proyecto", "nombre_uf"]
+    assert input_schema["properties"]["name"]["type"] == "string"
+
+    # Keys required by every branch are required at the top level
+    assert sorted(input_schema["required"]) == ["name", "scope"]
+
+    # The tool remains a plain-object schema at the top level
+    assert input_schema["type"] == "object"
+
+
+def test_union_body_conflicting_property_hint():
+    """When union branches disagree on a property's shape, the merged hint must not over-constrain."""
+    from typing import Annotated, Literal, Union
+
+    from pydantic import BaseModel, Field
+
+    class VariantA(BaseModel):
+        kind: Literal["a"]
+        value: str
+
+    class VariantB(BaseModel):
+        kind: Literal["b"]
+        value: int
+
+    Query = Annotated[Union[VariantA, VariantB], Field(discriminator="kind")]
+
+    app = FastAPI()
+
+    @app.post("/conflict", operation_id="conflict")
+    async def conflict(body: Query):  # type: ignore[valid-type]
+        return {}
+
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        openapi_version=app.openapi_version,
+        description=app.description,
+        routes=app.routes,
+    )
+
+    tools, _ = convert_openapi_to_mcp_tools(openapi_schema)
+    input_schema = tools[0].inputSchema
+
+    # `value` differs between branches: the hint stays visible but unconstrained,
+    # so a payload valid for either branch is never rejected by the merged hint.
+    assert "type" not in input_schema["properties"]["value"]
+    assert sorted(input_schema["properties"]["kind"]["enum"]) == ["a", "b"]
+    assert input_schema["required"] == ["kind", "value"]
