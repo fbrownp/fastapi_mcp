@@ -667,18 +667,24 @@ def test_discriminated_union_body_conversion():
     assert len(tools) == 1
     input_schema = tools[0].inputSchema
 
-    # The union branches survive, with their discriminator, for exact validation
-    assert "oneOf" in input_schema
-    assert len(input_schema["oneOf"]) == 2
-    assert input_schema["discriminator"]["propertyName"] == "scope"
+    # No composition keywords at the top level: Anthropic's direct tools API rejects
+    # them, and Copilot Studio's connector layer surfaces such tools with no
+    # parameters at all (its model then calls the tool with {}).
+    assert "oneOf" not in input_schema
+    assert "anyOf" not in input_schema
+    assert "discriminator" not in input_schema
 
-    # Merged top-level property hints for clients that ignore oneOf
+    # Merged flat properties from all branches
     assert set(input_schema["properties"].keys()) == {"scope", "name"}
     assert sorted(input_schema["properties"]["scope"]["enum"]) == ["nombre_proyecto", "nombre_uf"]
     assert input_schema["properties"]["name"]["type"] == "string"
 
     # Keys required by every branch are required at the top level
     assert sorted(input_schema["required"]) == ["name", "scope"]
+
+    # Per-variant requirements are summarized in the description instead of a oneOf
+    assert "scope='nombre_proyecto': requires name" in input_schema["description"]
+    assert "scope='nombre_uf': requires name" in input_schema["description"]
 
     # The tool remains a plain-object schema at the top level
     assert input_schema["type"] == "object"
@@ -722,3 +728,4 @@ def test_union_body_conflicting_property_hint():
     assert "type" not in input_schema["properties"]["value"]
     assert sorted(input_schema["properties"]["kind"]["enum"]) == ["a", "b"]
     assert input_schema["required"] == ["kind", "value"]
+    assert "oneOf" not in input_schema
