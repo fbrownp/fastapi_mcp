@@ -2,9 +2,22 @@ import copy
 from typing import Any, Dict, FrozenSet, Optional
 
 
+def _variant_tag_value(variant: Dict[str, Any], tag_name: Optional[str]) -> Optional[str]:
+    """The discriminator tag value a union variant fixes, if it can be determined."""
+    if not tag_name:
+        return None
+    tag_schema = variant.get("properties", {}).get(tag_name, {})
+    if "const" in tag_schema:
+        return tag_schema["const"]
+    enum_values = tag_schema.get("enum", [])
+    if len(enum_values) == 1:
+        return enum_values[0]
+    return None
+
+
 def build_union_body_input_schema(schema: Dict[str, Any], operation_id: str) -> Dict[str, Any]:
     """
-    Build a tool input schema for a top-level union request body (oneOf/anyOf).
+    Build a flat tool input schema for a top-level union request body (oneOf/anyOf).
 
     FastAPI emits a discriminated Union body (e.g. `body: Annotated[Union[A, B],
     Field(discriminator='scope')]`) as a schema with oneOf/anyOf branches and no
@@ -12,11 +25,16 @@ def build_union_body_input_schema(schema: Dict[str, Any], operation_id: str) -> 
     as taking no arguments, so schema-abiding clients call it with `{}` and the
     endpoint rejects the call with a validation error.
 
-    The returned schema keeps the union branches (and discriminator) for exact
-    validation, and additionally merges the branches' properties at the top level
-    as a hint for clients that ignore oneOf/anyOf. Only keys required by *every*
-    branch are marked required. The discriminator property is widened to an enum
-    of all its tag values, since each branch constrains it to a single constant.
+    The union is deliberately NOT reproduced at the top level of the tool schema:
+    composition keywords there are rejected or mishandled by several MCP hosts
+    (Anthropic's direct tools API rejects top-level oneOf/anyOf/allOf outright;
+    Microsoft Copilot Studio's connector layer surfaces such a tool with no
+    parameters at all, so its model calls it with `{}`). Instead the branches'
+    properties are merged into one flat object: keys required by *every* branch
+    are marked required, the discriminator property is widened to an enum of all
+    its tag values, and the schema description summarizes which fields each
+    variant requires. Exact per-variant validation stays where it always was —
+    the endpoint's own model (e.g. Pydantic's discriminated union).
     """
     variant_key = "oneOf" if "oneOf" in schema else "anyOf"
     variants = [v for v in schema.get(variant_key, []) if isinstance(v, dict)]
@@ -30,34 +48,50 @@ def build_union_body_input_schema(schema: Dict[str, Any], operation_id: str) -> 
                 merged_properties[prop_name] = copy.deepcopy(prop_schema)
             elif merged_properties[prop_name] != prop_schema:
                 # Branches disagree on this property's shape. Keep the key visible
-                # as a hint, but leave validation to the union branches so a value
-                # that is valid for one branch is never rejected by the merged hint.
+                # as a hint, but leave validation to the endpoint so a value that
+                # is valid for one branch is never rejected by the merged hint.
                 merged_properties[prop_name] = {"title": prop_name}
         variant_required = frozenset(variant.get("required", variant_properties.keys()))
         merged_required = variant_required if merged_required is None else merged_required & variant_required
 
     discriminator = schema.get("discriminator")
-    if discriminator:
-        tag_name = discriminator.get("propertyName")
+    tag_name = discriminator.get("propertyName") if discriminator else None
+    if discriminator and tag_name:
         tag_values = list(discriminator.get("mapping", {}).keys())
         if not tag_values:
             for variant in variants:
-                tag_schema = variant.get("properties", {}).get(tag_name, {})
-                if "const" in tag_schema:
-                    tag_values.append(tag_schema["const"])
-                else:
-                    tag_values.extend(tag_schema.get("enum", []))
-        if tag_name and tag_values:
-            merged_properties[tag_name] = {"type": "string", "enum": tag_values, "title": tag_name}
+                tag_value = _variant_tag_value(variant, tag_name)
+                if tag_value is not None:
+                    tag_values.append(tag_value)
+        if tag_values:
+            merged_properties[tag_name] = {
+                "type": "string",
+                "enum": tag_values,
+                "title": tag_name,
+                "description": "Selects which argument variant applies (see the schema description).",
+            }
+
+    # Summarize per-variant requirements, since flattening loses branch-specific
+    # `required` lists. Clients and models read this instead of a oneOf.
+    summary_lines = []
+    for variant in variants:
+        variant_properties = variant.get("properties", {})
+        required_fields = [r for r in variant.get("required", list(variant_properties.keys())) if r != tag_name]
+        tag_value = _variant_tag_value(variant, tag_name)
+        if tag_value is not None:
+            label = f"{tag_name}={tag_value!r}"
+        else:
+            label = variant.get("title") or "variant"
+        requires = ", ".join(required_fields) if required_fields else "no other fields"
+        summary_lines.append(f"- {label}: requires {requires}")
 
     input_schema: Dict[str, Any] = {
         "type": "object",
         "properties": merged_properties,
         "title": f"{operation_id}Arguments",
-        variant_key: copy.deepcopy(variants),
     }
-    if discriminator:
-        input_schema["discriminator"] = copy.deepcopy(discriminator)
+    if summary_lines:
+        input_schema["description"] = "Exactly one variant of arguments applies:\n" + "\n".join(summary_lines)
     if merged_required:
         input_schema["required"] = sorted(merged_required)
     return input_schema
