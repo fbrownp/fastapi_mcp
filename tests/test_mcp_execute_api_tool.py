@@ -112,6 +112,96 @@ async def test_execute_api_tool_with_body(simple_fastapi_app: FastAPI):
 
 
 @pytest.mark.asyncio
+async def test_execute_api_tool_sends_empty_json_body_when_operation_declares_request_body(
+    simple_fastapi_app: FastAPI,
+):
+    """A zero-argument call still POSTs `{}` when the operation declares a requestBody.
+
+    Regression test: an endpoint's body parameter can be a *required* Pydantic model with zero
+    fields of its own (e.g. every field it would need comes from headers instead) -- calling such
+    a tool with no leftover ``arguments`` after path/query/header extraction used to send no HTTP
+    body at all (``body = arguments if arguments else None``), which such an endpoint 422s
+    ``Field required`` on. Gating on the operation's own declared ``request_body`` (populated from
+    the OpenAPI ``requestBody``, see ``openapi/convert.py``) instead sends ``{}``, which validates
+    fine either way. ``simple_fastapi_app`` is only used to construct a real ``FastApiMCP``
+    instance; the operation itself is a synthetic ``operation_map`` entry so this test never needs
+    a real zero-field-body route on the shared fixture app (which several other tests assert an
+    exact operation count/list against).
+    """
+    mcp = FastApiMCP(simple_fastapi_app)
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"ok": True}
+    mock_response.status_code = 200
+    mock_response.text = '{"ok": true}'
+
+    mock_client = AsyncMock()
+    mock_client.post.return_value = mock_response
+
+    operation_map = {
+        "zero_arg_with_body": {
+            "path": "/scope-only",
+            "method": "post",
+            "parameters": [],
+            "request_body": {"content": {"application/json": {"schema": {"type": "object"}}}},
+            "_meta": {},
+        }
+    }
+
+    with patch.object(mcp, "_http_client", mock_client):
+        result = await mcp._execute_api_tool(
+            client=mock_client,
+            tool_name="zero_arg_with_body",
+            arguments={},
+            operation_map=operation_map,
+        )
+
+    assert result.isError is False
+    mock_client.post.assert_called_once_with("/scope-only", params={}, headers={}, json={})
+
+
+@pytest.mark.asyncio
+async def test_execute_api_tool_sends_no_body_when_operation_declares_no_request_body(
+    simple_fastapi_app: FastAPI,
+):
+    """A zero-argument call still sends no HTTP body when the operation has no requestBody at all.
+
+    Unchanged behavior: a ``delete_item``-shaped operation (no request body declared) must never
+    gain a spurious ``{}`` body from the fix under test above.
+    """
+    mcp = FastApiMCP(simple_fastapi_app)
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {}
+    mock_response.status_code = 200
+    mock_response.text = "{}"
+
+    mock_client = AsyncMock()
+    mock_client.post.return_value = mock_response
+
+    operation_map = {
+        "zero_arg_no_body": {
+            "path": "/no-body",
+            "method": "post",
+            "parameters": [],
+            "request_body": {},
+            "_meta": {},
+        }
+    }
+
+    with patch.object(mcp, "_http_client", mock_client):
+        result = await mcp._execute_api_tool(
+            client=mock_client,
+            tool_name="zero_arg_no_body",
+            arguments={},
+            operation_map=operation_map,
+        )
+
+    assert result.isError is False
+    mock_client.post.assert_called_once_with("/no-body", params={}, headers={}, json=None)
+
+
+@pytest.mark.asyncio
 async def test_execute_api_tool_with_non_ascii_chars(simple_fastapi_app: FastAPI):
     """Test execution of an API tool with non-ASCII characters."""
     mcp = FastApiMCP(simple_fastapi_app)

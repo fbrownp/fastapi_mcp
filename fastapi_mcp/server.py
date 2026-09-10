@@ -551,7 +551,15 @@ class FastApiMCP:
                 if name.lower() in self._forward_headers:
                     headers[name] = value
 
-        body = arguments if arguments else None
+        # A zero-argument tool call whose operation still declares a request body must still
+        # send `{}`, not no body at all: the wire difference matters because the FastAPI
+        # endpoint's own body parameter can be a *required* model with no fields of its own
+        # (e.g. a scope-only body resolved entirely from headers) -- sending no body at all 422s
+        # "Field required" on such an endpoint, while `{}` validates fine either way. An
+        # operation with no request body at all (GET/DELETE, or a POST with none declared) keeps
+        # sending no body, unchanged.
+        has_request_body = bool(operation.get("request_body"))
+        body = arguments if (arguments or has_request_body) else None
 
         try:
             response = await self._request(client, method, path, query, headers, body)
