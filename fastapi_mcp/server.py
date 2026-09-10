@@ -551,15 +551,19 @@ class FastApiMCP:
                 if name.lower() in self._forward_headers:
                     headers[name] = value
 
-        # A zero-argument tool call whose operation still declares a request body must still
-        # send `{}`, not no body at all: the wire difference matters because the FastAPI
-        # endpoint's own body parameter can be a *required* model with no fields of its own
-        # (e.g. a scope-only body resolved entirely from headers) -- sending no body at all 422s
-        # "Field required" on such an endpoint, while `{}` validates fine either way. An
-        # operation with no request body at all (GET/DELETE, or a POST with none declared) keeps
-        # sending no body, unchanged.
-        has_request_body = bool(operation.get("request_body"))
-        body = arguments if (arguments or has_request_body) else None
+        # A zero-argument tool call whose operation still declares a *required* request body
+        # must still send `{}`, not no body at all: the wire difference matters because the
+        # FastAPI endpoint's own body parameter can be a required model with no fields of its
+        # own (e.g. a scope-only body resolved entirely from headers) -- sending no body at all
+        # 422s "Field required" on such an endpoint, while `{}` validates fine either way.
+        # Gating on mere presence of a declared requestBody (rather than its `required` flag)
+        # would regress *optional* bodies (`body: Model | None = None`): FastAPI still declares
+        # a requestBody for those (just without `required: true`), so a zero-argument call would
+        # send `{}` where the endpoint expects `None` -- 422ing a required-field model, or
+        # silently swapping `None` for a defaults-instantiated model. An operation with no
+        # request body at all, or an optional one, keeps sending no body, unchanged.
+        has_required_request_body = bool(operation.get("request_body", {}).get("required", False))
+        body = arguments if (arguments or has_required_request_body) else None
 
         try:
             response = await self._request(client, method, path, query, headers, body)

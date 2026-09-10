@@ -97,6 +97,36 @@ def build_union_body_input_schema(schema: Dict[str, Any], operation_id: str) -> 
     return input_schema
 
 
+def unwrap_optional_body_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Unwrap a top-level ``oneOf``/``anyOf`` of exactly [object schema, {"type": "null"}] to the
+    object schema itself.
+
+    FastAPI represents an *optional* request body (``body: Model | None = None``) as
+    ``{"anyOf": [<Model schema>, {"type": "null"}], ...}`` with no top-level "properties" key --
+    the same shape a genuine discriminated union body has. Left unrecognized, this schema is
+    routed into `build_union_body_input_schema`, which fabricates a fictitious
+    "Exactly one variant of arguments applies" description and leaks the model's internal name
+    (e.g. "- ModelName: requires no other fields") for a body that is not a union at all; it is a
+    single optional model. Callers must apply this before classifying a body schema as a union so
+    an optional-body operation's tool input schema (properties, required, description) comes out
+    identical to the same body declared required. A schema that does not match this exact
+    two-variant [object, null] shape (a real union, or an optional body of a non-object type) is
+    returned unchanged.
+    """
+    variant_key = "oneOf" if "oneOf" in schema else "anyOf" if "anyOf" in schema else None
+    if variant_key is None:
+        return schema
+    variants = [v for v in schema.get(variant_key, []) if isinstance(v, dict)]
+    if len(variants) != 2:
+        return schema
+    null_variants = [v for v in variants if v.get("type") == "null"]
+    object_variants = [v for v in variants if v.get("type") != "null" and "properties" in v]
+    if len(null_variants) != 1 or len(object_variants) != 1:
+        return schema
+    return object_variants[0]
+
+
 def is_union_schema(param_schema: Dict[str, Any]) -> bool:
     """
     Whether the schema is a union (anyOf/oneOf/allOf) that must be preserved as-is.

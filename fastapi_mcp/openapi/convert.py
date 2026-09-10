@@ -11,6 +11,7 @@ from .utils import (
     get_single_param_type_from_schema,
     is_union_schema,
     resolve_schema_references,
+    unwrap_optional_body_schema,
 )
 
 logger = logging.getLogger(__name__)
@@ -200,6 +201,13 @@ def convert_openapi_to_mcp_tools(
                 content_type = next(iter(request_body["content"]), None)
                 if content_type and "schema" in request_body["content"][content_type]:
                     schema = request_body["content"][content_type]["schema"]
+                    # An *optional* body (`body: Model | None = None`) is emitted by FastAPI as
+                    # `{"anyOf": [<Model schema>, {"type": "null"}]}` -- the same no-"properties"
+                    # shape a genuine union body has. Unwrap it to the model schema first so it
+                    # is classified (and flattened into `properties` below) exactly like the same
+                    # body declared required, instead of falling into the oneOf/anyOf branch
+                    # below and being misrepresented as a discriminated union.
+                    schema = unwrap_optional_body_schema(schema)
                     if "properties" in schema:
                         for prop_name, prop_schema in schema["properties"].items():
                             required = prop_name in schema.get("required", [])

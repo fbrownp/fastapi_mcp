@@ -729,3 +729,89 @@ def test_union_body_conflicting_property_hint():
     assert sorted(input_schema["properties"]["kind"]["enum"]) == ["a", "b"]
     assert input_schema["required"] == ["kind", "value"]
     assert "oneOf" not in input_schema
+
+
+def test_optional_body_conversion_matches_required_body_and_leaks_no_union_text():
+    """An optional (`Model | None = None`) body must convert like the same body required.
+
+    Regression test: FastAPI emits an optional body as `{"anyOf": [<Model schema>, {"type":
+    "null"}]}` -- the exact same no-"properties" shape a genuine discriminated union body has.
+    Left unrecognized, this schema fell into `build_union_body_input_schema` and produced a
+    tool description of "Exactly one variant of arguments applies:\n- ModelName: requires no
+    other fields", leaking the model's internal Python class name into LLM-facing tool text for
+    an operation that is not a union at all. The fix must unwrap this shape to the model schema
+    before union classification so the optional-body tool's input schema is indistinguishable
+    from the same body declared required (properties, required list, and description all match),
+    and the description never mentions "variant" or the model's class name.
+    """
+    from pydantic import BaseModel
+
+    class ScopeOnlyBody(BaseModel):
+        pass
+
+    class BodyWithFields(BaseModel):
+        name: str
+        note: str = "default"
+
+    app = FastAPI()
+
+    @app.post("/optional-scope", operation_id="optional_scope")
+    async def optional_scope(body: ScopeOnlyBody | None = None):
+        return {"ok": True}
+
+    @app.post("/required-scope", operation_id="required_scope")
+    async def required_scope(body: ScopeOnlyBody):
+        return {"ok": True}
+
+    @app.post("/optional-fields", operation_id="optional_fields")
+    async def optional_fields(body: BodyWithFields | None = None):
+        return {"ok": True}
+
+    @app.post("/required-fields", operation_id="required_fields")
+    async def required_fields(body: BodyWithFields):
+        return {"ok": True}
+
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        openapi_version=app.openapi_version,
+        description=app.description,
+        routes=app.routes,
+    )
+
+    tools, operation_map = convert_openapi_to_mcp_tools(openapi_schema)
+    schemas = {t.name: t.inputSchema for t in tools}
+
+    # Zero-field model: the optional-body tool's schema is a plain, description-free object,
+    # identical to the required-body tool's schema apart from the title.
+    optional_scope_schema = dict(schemas["optional_scope"])
+    required_scope_schema = dict(schemas["required_scope"])
+    optional_scope_schema.pop("title")
+    required_scope_schema.pop("title")
+    assert optional_scope_schema == required_scope_schema == {"type": "object", "properties": {}}
+
+    # No union/model-name leakage anywhere in the optional tool's schema text.
+    schema_text = str(schemas["optional_scope"])
+    assert "variant" not in schema_text
+    assert "ScopeOnlyBody" not in schema_text
+    assert "anyOf" not in schema_text
+    assert "oneOf" not in schema_text
+
+    # Model with fields: same parity check, including the required list.
+    optional_fields_schema = dict(schemas["optional_fields"])
+    required_fields_schema = dict(schemas["required_fields"])
+    optional_fields_schema.pop("title")
+    required_fields_schema.pop("title")
+    assert optional_fields_schema == required_fields_schema
+    assert optional_fields_schema["required"] == ["name"]
+    assert set(optional_fields_schema["properties"].keys()) == {"name", "note"}
+
+    schema_text = str(schemas["optional_fields"])
+    assert "variant" not in schema_text
+    assert "BodyWithFields" not in schema_text
+
+    # The declared-`required` flag on the requestBody itself still distinguishes the two --
+    # that is what the fork's `_execute_api_tool` gates the `{}`-body fix on (see
+    # `test_mcp_execute_api_tool.py`).
+    assert operation_map["optional_scope"]["request_body"].get("required") in (False, None)
+    assert operation_map["required_scope"]["request_body"]["required"] is True
